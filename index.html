@@ -243,6 +243,30 @@
        font-variant-numeric:tabular-nums;line-height:1.5}
   .sr{position:absolute;width:1px;height:1px;overflow:hidden;
       clip:rect(0 0 0 0);white-space:nowrap}
+  /* ---- handset ----
+     Everything below is driven by what the page actually does at 375-412px,
+     not by a guess about phones. The tooltip is the sharp edge: white-space:pre
+     never wraps, so max-width on its own only clips the figures off the right
+     of the box. Dropping the type one notch brings the widest aligned block
+     inside a 375px screen and lets the box use the full width. */
+  @media (max-width:560px){
+    .tip{font-size:10.5px;max-width:calc(100vw - 16px);line-height:1.45}
+    /* A 20px control is a coin-toss for a fingertip. These are still compact,
+       but they are now reliably hittable without zooming. */
+    .lg button{padding:6px 8px;font-size:11.5px;min-height:32px}
+    .lg i{width:11px;height:11px}
+    .card .tools button{padding:7px 10px;font-size:11px;min-height:32px}
+    .card .tools select{padding:7px 8px;font-size:11px;max-width:none;
+      min-height:32px}
+    .wrap{padding-left:14px;padding-right:14px}
+    .card{padding:12px}
+    /* Momentum scrolling for the wide detail table, which cannot shed columns
+       without ceasing to be a detail table. */
+    .scroll{-webkit-overflow-scrolling:touch}
+    /* Double-tap-to-zoom costs every chart tap a 300ms wait. Pan and pinch
+       are untouched. */
+    .card svg{touch-action:manipulation}
+  }
   @media print{
     /* The dark theme is screen-only, so the page chrome already prints light.
        Chart ink is set as SVG attributes rather than CSS, so `printLight()`
@@ -881,22 +905,72 @@ const el=(n,a={})=>{const e=document.createElementNS(NS,n);
 const txt=(n,a,s)=>{const e=el(n,a); e.textContent=s; return e;};
 
 const tip=document.getElementById('tip');
-function showTip(e,text){
+function showTip(e,text,touch){
   tip.textContent=text; tip.style.opacity=1;
   tip.setAttribute('aria-hidden','false');
   /* Clamp inside the viewport so edge points stay readable. */
   const pad=14, w=tip.offsetWidth||240, h=tip.offsetHeight||70;
   let x=e.clientX+pad, y=e.clientY+pad;
-  if(x+w>innerWidth-8)  x=e.clientX-w-pad;
+  /* A finger covers what it points at. On touch the box goes above the tap
+     and centres on it, and only drops below when there is no room above. */
+  if(touch){
+    x=e.clientX-w/2;
+    y=e.clientY-h-18;
+    if(y<8) y=e.clientY+24;
+  }
+  if(x+w>innerWidth-8)  x=touch?innerWidth-w-8:e.clientX-w-pad;
   if(y+h>innerHeight-8) y=e.clientY-h-pad;
   tip.style.left=Math.max(8,x)+'px'; tip.style.top=Math.max(8,y)+'px';
 }
-function hideTip(){tip.style.opacity=0; tip.setAttribute('aria-hidden','true');}
+/* Guide lines and focus dots live inside the chart that drew them, and a tap
+   dismissal happens at the document level with no idea which chart is lit. So
+   each chart parks its own cleanup here and frame() empties the slot when it
+   redraws, which keeps the list from growing a stale entry per render. */
+const HVCLEAR={};
+let tipPinned=false;
+function clearMarks(){
+  for(const k in HVCLEAR) HVCLEAR[k].forEach(f=>f());
+}
+function hideTip(){
+  tip.style.opacity=0; tip.setAttribute('aria-hidden','true');
+  tipPinned=false; clearMarks();
+}
 
-/* Every hover detail must also reach keyboard and screen-reader users. */
+/* Touch has no hover. Every readout on this page was written for a pointer
+   that can rest on a shape, so on a phone the entire value layer would be
+   unreachable - the composition figures, the peer ranks, the bump standings.
+   A tap opens the readout and pins it; the next tap anywhere closes it.
+   The listener is registered once, in the CAPTURE phase, so when a tap lands
+   on a second shape this runs first and closes the old readout before that
+   shape's own handler opens the new one.
+   Nothing here calls preventDefault. Charts cover most of a phone screen, and
+   cancelling pointerdown on them would cancel the page's scrolling with it.
+   Instead a gesture that travels is treated as what it is - a scroll - and the
+   readout it opened gets taken back down. */
+let tapAt=null;
+document.addEventListener('pointerdown',function(e){
+  if(e.pointerType==='mouse') return;
+  if(tipPinned) hideTip();
+  tapAt={x:e.clientX,y:e.clientY};
+},true);
+document.addEventListener('pointermove',function(e){
+  if(!tapAt||e.pointerType==='mouse') return;
+  if(Math.abs(e.clientX-tapAt.x)+Math.abs(e.clientY-tapAt.y)>12){
+    tapAt=null; if(tipPinned) hideTip();
+  }
+},true);
+
+/* Every hover detail must also reach keyboard, screen-reader and touch users. */
 function hover(node,text){
   node.addEventListener('mousemove',e=>showTip(e,text));
   node.addEventListener('mouseleave',hideTip);
+  /* pointerdown, not click: a tap on an SVG shape inside a scrolling page is
+     unreliable as a click, and waiting for one costs the reader the delay.
+     Mouse pointers are filtered out because mousemove already served them. */
+  node.addEventListener('pointerdown',function(e){
+    if(e.pointerType==='mouse') return;
+    showTip(e,text,true); tipPinned=true;
+  });
   node.setAttribute('tabindex','0');
   node.setAttribute('role','img');
   node.setAttribute('aria-label',text.replace(/\n/g,'. '));
@@ -922,9 +996,24 @@ function empty(hostId,msg){
   document.getElementById(hostId).innerHTML='<div class="empty">'+msg+'</div>';
 }
 
+/* Layout decisions are taken from the width the chart is actually being drawn
+   into - never from a user-agent string, which lies, and never from a CSS
+   breakpoint, which cannot see that this card is a 4-column span on one row
+   and a 12-column span on another.
+   Below this width a fixed label gutter costs more than the labels are worth:
+   at 287px of card, the peer chart's 400px of reserved margin left it with a
+   NEGATIVE plot and it drew backwards. */
+const NARROW=560;
+function hostW(hostId){
+  const h=document.getElementById(hostId);
+  return (h&&h.clientWidth)||640;
+}
+function isNarrow(hostId){ return hostW(hostId)<NARROW; }
+
 function frame(hostId,h,pad,title,desc){
   const host=document.getElementById(hostId);
   host.innerHTML='';
+  HVCLEAR[hostId]=[];
   const w = host.clientWidth || 640;
   const svg = el('svg',{viewBox:'0 0 '+w+' '+h, height:h,
     role:'img', 'aria-label':title});
@@ -943,7 +1032,7 @@ function frame(hostId,h,pad,title,desc){
     'text-anchor':'end',opacity:.72,'aria-hidden':'true',
     'pointer-events':'none'},MARK));
   host.appendChild(svg);
-  return {svg,w,h,pad,host};
+  return {svg,w,h,pad,host,hostId};
 }
 
 /* True time scale. A three-month step must be three times a one-month step,
@@ -1084,6 +1173,9 @@ function hoverBands(g,items,x,text,marks){
     guide.setAttribute('opacity',0);
     dots.setAttribute('opacity',0);
   };
+  /* A tap-to-dismiss happens at the document level and cannot reach into this
+     closure on its own, so hand the cleanup to the chart's slot. */
+  if(HVCLEAR[g.hostId]) HVCLEAR[g.hostId].push(clear);
   items.forEach(function(it,i){
     const lo = i===0 ? g.pad.l : (xs[i-1]+xs[i])/2;
     const hi = i===items.length-1 ? g.w-g.pad.r : (xs[i]+xs[i+1])/2;
@@ -1104,6 +1196,11 @@ function hoverBands(g,items,x,text,marks){
     band.addEventListener('mouseleave',clear);
     band.addEventListener('focus',show);
     band.addEventListener('blur',clear);
+    /* Touch gets the guide and focus dots too - without them the pinned
+       readout names a period the reader cannot see on the plot. */
+    band.addEventListener('pointerdown',function(e){
+      if(e.pointerType!=='mouse') show();
+    });
     hover(band,text(it,i));
     g.svg.appendChild(band);
   });
@@ -1527,9 +1624,13 @@ function drawFundingBanks(){
 
   /* The right margin holds two things that must not touch: the bar's own value,
      which starts wherever the bar ends, and the contribution column, which is
-     right-anchored against the frame. */
+     right-anchored against the frame.
+     Neither fits on a phone: 282px of margin in a 287px card leaves 5px of
+     plot. Narrow drops to bank codes and retires the contribution column to
+     the tap readout, where it is printed in full either way. */
+  const nw=isNarrow('ch-fund');
   const g=frame('ch-fund',Math.max(210,rows.length*26+40),
-    {l:150,r:132,t:14,b:26},
+    nw?{l:48,r:52,t:14,b:26}:{l:150,r:132,t:14,b:26},
     'Loan to deposit ratio by bank for '+(p.period_label||''),
     'Bars past the hundred per cent line mark banks lending more than they take in deposits.');
   const vals=rows.map(r=>r.loan_to_deposit);
@@ -1573,14 +1674,14 @@ function drawFundingBanks(){
     hover(rect,out.join('\n'));
     g.svg.appendChild(rect);
     g.svg.appendChild(txt('text',{x:g.pad.l-8,y:yy+bw/2,class:'ax',
-      'text-anchor':'end'},r.bank_name));
+      'text-anchor':'end'},nw?r.bank_code:r.bank_name));
     g.svg.appendChild(txt('text',{x:X(v)+6,y:yy+bw/2,class:'axb'},pct(v)));
-    if(it) g.svg.appendChild(txt('text',{x:g.w-4,y:yy+bw/2,
+    if(it&&!nw) g.svg.appendChild(txt('text',{x:g.w-4,y:yy+bw/2,
       'font-size':10,'text-anchor':'end','font-variant-numeric':'tabular-nums',
       fill:Math.abs(it.contrib)<0.05?INK.muted
            :(it.contrib>0?INK.bad:INK.good)},dPct(it.contrib,2)));
   });
-  if(c) g.svg.appendChild(txt('text',{x:g.w-4,y:g.pad.t-2,
+  if(c&&!nw) g.svg.appendChild(txt('text',{x:g.w-4,y:g.pad.t-2,
     'font-size':9,'text-anchor':'end',fill:INK.muted},'effect on system'));
   /* The hundred per cent line is the one that matters: past it a bank is
      lending money it did not take in as deposits. */
@@ -1613,7 +1714,13 @@ function drawRank(){
   if(!rows.length) return empty('ch-rank',
     'No '+label+' reported for this period.');
 
-  const g=frame('ch-rank',Math.max(210,rows.length*26+34),{l:150,r:82,t:10,b:22},
+  /* The left gutter exists to hold full bank names. On a phone that gutter is
+     half the card, and the bars it labels collapse to nothing - measured at
+     55px of plot on a 375px screen. Codes carry the same identity in a
+     quarter of the space, and the full name is still one tap away. */
+  const nw=isNarrow('ch-rank');
+  const g=frame('ch-rank',Math.max(210,rows.length*26+34),
+    nw?{l:48,r:54,t:10,b:22}:{l:150,r:82,t:10,b:22},
     'Bank ranking by '+label+' for '+(p?p.period_label:''),
     'Horizontal bars ordered largest to smallest.');
   const vals=rows.map(r=>r[key]);
@@ -1635,7 +1742,7 @@ function drawRank(){
       'Share of system assets: '+pct(r.market_share_assets));
     g.svg.appendChild(rect);
     g.svg.appendChild(txt('text',{x:g.pad.l-8,y:yy+bw/2,class:'ax',
-      'text-anchor':'end'},r.bank_name));
+      'text-anchor':'end'},nw?r.bank_code:r.bank_name));
     g.svg.appendChild(txt('text',{x:Math.max(x0,xv)+6,y:yy+bw/2,class:'axb'},
       fmt(v,kind)));
   });
@@ -1866,20 +1973,32 @@ function drawPeer(){
       : ' \u00b7 compared against all '+items[0].sp.n+' banks')+
     (gm?' \u00b7 growth '+gm.basis:'');
 
-  const rowH=30, padT=24;
-  const g=frame('ch-peer',items.length*rowH+padT+16,{l:186,r:214,t:padT,b:8},
+  /* On a phone there is no room for a label gutter on the left and two value
+     columns on the right, so the row unfolds: metric label above, the strip
+     across the full card, the bank readouts below. 400px of reserved margin
+     in a 287px card is not a tight fit - it is a negative plot width, and the
+     chart draws backwards. Measured at 375/393/412px before this changed. */
+  const nw=isNarrow('ch-peer');
+  const rowH=nw?70:30, padT=24;
+  const g=frame('ch-peer',items.length*rowH+padT+16,
+    nw?{l:12,r:12,t:padT,b:8}:{l:186,r:214,t:padT,b:8},
     'Head-to-head comparison of '+nameA+(nameB?' and '+nameB:'')+
     ' against the peer distribution on core measures',
     'Each row shows the peer range, the interquartile band, the sector median, and the selected banks.');
   const x0=g.pad.l, x1=g.w-g.pad.r;
   g.svg.appendChild(txt('text',{x:x0,y:13,class:'ax'},'worst'));
   g.svg.appendChild(txt('text',{x:x1,y:13,class:'ax','text-anchor':'end'},'best'));
-  g.svg.appendChild(txt('text',{x:x1+8,y:13,class:'ax'},nameA?nameA.slice(0,14):''));
-  if(nameB) g.svg.appendChild(txt('text',{x:x1+112,y:13,class:'ax'},
-    nameB.slice(0,14)));
+  /* The column headers only exist because the wide layout has columns. In the
+     stacked layout every value is already labelled with its own bank. */
+  if(!nw){
+    g.svg.appendChild(txt('text',{x:x1+8,y:13,class:'ax'},nameA?nameA.slice(0,14):''));
+    if(nameB) g.svg.appendChild(txt('text',{x:x1+112,y:13,class:'ax'},
+      nameB.slice(0,14)));
+  }
 
   items.forEach((it,i)=>{
-    const y=g.pad.t+i*rowH+rowH/2;
+    const top=g.pad.t+i*rowH;
+    const y=nw?top+38:top+rowH/2;
     const sp=it.sp;
     // Orient the axis so "further right" always means "better" where that is
     // meaningful; neutral measures keep their natural low-to-high direction.
@@ -1894,7 +2013,7 @@ function drawPeer(){
        when the field happens to be evenly spread. Two banks can both sit left
        of the notch and still be different distances from the pack. Saying that
        once, on the element itself, is the only place a reader will look. */
-    const hit=el('rect',{x:x0-6,y:y-rowH/2+1,width:(x1-x0)+12,
+    const hit=el('rect',{x:x0-6,y:top+1,width:(x1-x0)+12,
       height:rowH-2,fill:'transparent'});
     const lower=sp.vals.filter(v=>v<sp.med).length;
     const upper=sp.vals.filter(v=>v>sp.med).length;
@@ -1919,8 +2038,10 @@ function drawPeer(){
               :'Lower is better, so the axis is reversed and better is still to the right'));
     g.svg.appendChild(hit);
 
-    g.svg.appendChild(txt('text',{x:x0-10,y:y+4,class:'ax','text-anchor':'end',
-      'pointer-events':'none'},it.label));
+    g.svg.appendChild(nw
+      ? txt('text',{x:x0,y:top+14,class:'ax','pointer-events':'none'},it.label)
+      : txt('text',{x:x0-10,y:y+4,class:'ax','text-anchor':'end',
+          'pointer-events':'none'},it.label));
     g.svg.appendChild(el('line',{x1:x0,x2:x1,y1:y,y2:y,stroke:INK.range,
       'stroke-width':2,'stroke-linecap':'round','pointer-events':'none'}));
     g.svg.appendChild(el('rect',{x:Math.min(X(sp.q1),X(sp.q3)),y:y-6,
@@ -1949,7 +2070,10 @@ function drawPeer(){
       if(!row||code==null) return;
       const v=row[it.key];
       if(v==null||isNaN(v)) {
-        g.svg.appendChild(txt('text',{x:x1+8+slot*104,y:y+4,class:'ax'},'\u2013'));
+        g.svg.appendChild(nw
+          ? txt('text',{x:slot?x1:x0,y:top+62,class:'ax',
+              'text-anchor':slot?'end':'start'},(nm?nm.slice(0,12)+'  ':'')+'\u2013')
+          : txt('text',{x:x1+8+slot*104,y:y+4,class:'ax'},'\u2013'));
         return;
       }
       const better = it.hi==null ? null
@@ -1985,12 +2109,22 @@ function drawPeer(){
                      :(better?'Better than the median'
                              :'Worse than the median')));
       g.svg.appendChild(mk);
-      g.svg.appendChild(txt('text',{x:x1+8+slot*104,y:y+4,
-        'font-size':11,fill:col,'font-variant-numeric':'tabular-nums'},
-        fmt(v,it.kind)));
-      if(rk) g.svg.appendChild(txt('text',{x:x1+8+slot*104+96,y:y+4,
-        'font-size':9.5,fill:INK.muted,'text-anchor':'end',
-        'font-variant-numeric':'tabular-nums'},'#'+rk+'/'+sp.n));
+      if(nw){
+        /* Stacked layout: the bank names its own figure, because there is no
+           column header above it to do that job. */
+        g.svg.appendChild(txt('text',{x:slot?x1:x0,y:top+62,
+          'font-size':10.5,fill:col,'text-anchor':slot?'end':'start',
+          'font-variant-numeric':'tabular-nums','pointer-events':'none'},
+          (nm?nm.slice(0,12)+'  ':'')+fmt(v,it.kind)+
+          (rk?'  #'+rk+'/'+sp.n:'')));
+      }else{
+        g.svg.appendChild(txt('text',{x:x1+8+slot*104,y:y+4,
+          'font-size':11,fill:col,'font-variant-numeric':'tabular-nums'},
+          fmt(v,it.kind)));
+        if(rk) g.svg.appendChild(txt('text',{x:x1+8+slot*104+96,y:y+4,
+          'font-size':9.5,fill:INK.muted,'text-anchor':'end',
+          'font-variant-numeric':'tabular-nums'},'#'+rk+'/'+sp.n));
+      }
     });
   });
 }
